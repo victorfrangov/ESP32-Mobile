@@ -1,37 +1,45 @@
-#include <stdio.h>
-#include <string.h>
 #include "main.h"
+#include "weather.h"
 
-#define UART_NUM UART_NUM_0
-#define BUF_SIZE (1024)
+// Menu state model
+static Screen current_screen = SCREEN_MAIN;
+static const Menu* current_menu = NULL;
 
-static bool tnh_active = false;
-static bool settings_active = false;
-static bool wifi_active = false;
-static bool bluetooth_active = false;
+static int main_selected = 0;
+static int weather_selected = 0;
+static int settings_selected = 0;
+static bool wifi_connected = false;
 
-static int current_selection = 0;
-static const char* main_menu_items[] = {
-    "Flappy Bird",
-    "T&H",
-    "Time",
-    "Settings",
-    "Shutdown"
+// Main menu
+static const MenuItem main_menu_items[] = {
+    { "Games",       action_placeholder },
+    { "Weather",     action_open_weather },
+    { "Time",        action_placeholder },
+    { "Settings",    action_open_settings },
+    { "Shutdown",    action_placeholder }
 };
 #define MAIN_MENU_COUNT (sizeof(main_menu_items) / sizeof(main_menu_items[0]))
 
+static const MenuItem weather_menu_items[] = {
+    { "Here", action_tnh },
+    { "Montreal", action_weather_mtl }
+};
+#define WEATHER_MENU_COUNT (sizeof(weather_menu_items) / sizeof(weather_menu_items[0]))
+
 // Settings submenu
-static int settings_selection = 0;
-static const char* settings_menu_items[] = {
-    "WiFi",
-    "Bluetooth",
-    "Back"
+static const MenuItem settings_menu_items[] = {
+    { "WiFi",      action_wifi },
+    { "Bluetooth", action_bt },
+    { "Back",      action_back }
 };
 #define SETTINGS_MENU_COUNT (sizeof(settings_menu_items) / sizeof(settings_menu_items[0]))
 
+static const Menu main_menu = { main_menu_items, MAIN_MENU_COUNT, &main_selected };
+static const Menu weather_menu = { weather_menu_items, WEATHER_MENU_COUNT, &weather_selected };
+static const Menu settings_menu = { settings_menu_items, SETTINGS_MENU_COUNT, &settings_selected };
+
 u8g2_t u8g2;
 
-// Function to initialize I2C
 static void i2c_master_init(void) {
     i2c_config_t conf = {
         .mode = I2C_MODE_MASTER,
@@ -45,7 +53,6 @@ static void i2c_master_init(void) {
     i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0);
 }
 
-//init screen and u8g2
 static void u8g2_init(void) {    
     u8g2_esp32_hal_t u8g2_esp32_hal = U8G2_ESP32_HAL_DEFAULT;
     u8g2_esp32_hal.clk   = PIN_CLK;
@@ -77,52 +84,89 @@ static void uart_init(void) {
     uart_set_pin(UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 }
 
-void update_screen(void *message, const char *type) {
-    char buffer[64]; // Buffer to hold the formatted string
+static void update_screenf(const char* fmt, ...) {
+    char buffer[64];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
 
-    if (strcmp(type, "int") == 0) {
-        snprintf(buffer, sizeof(buffer), "%u", *(unsigned int *)message); // Format as integer
-    } else if (strcmp(type, "float") == 0) {
-        snprintf(buffer, sizeof(buffer), "%.2f", *(float *)message); // Format as float
-    } else if (strcmp(type, "string") == 0) {
-        snprintf(buffer, sizeof(buffer), "%s", (char *)message); // Format as string
+    u8g2_ClearBuffer(&u8g2);
+    u8g2_SetFont(&u8g2, u8g2_font_ncenB08_tr);
+    u8g2_DrawStr(&u8g2, 0, 15, buffer);
+    u8g2_SendBuffer(&u8g2);
+}
+
+static void draw_wifi_info(void) {
+    wifi_ap_record_t ap_info = {0};
+    esp_err_t ap_ret = esp_wifi_sta_get_ap_info(&ap_info);
+
+    esp_netif_ip_info_t ip_info = {0};
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif) {
+        esp_netif_get_ip_info(netif, &ip_info);
+    }
+
+    u8g2_ClearBuffer(&u8g2);
+    u8g2_SetFont(&u8g2, u8g2_font_ncenB08_tr);
+
+    if (ap_ret == ESP_OK) {
+        char line[64];
+
+        u8g2_DrawStr(&u8g2, 0, 12, "WiFi CONNECTED");
+
+        snprintf(line, sizeof(line), "SSID: %s", (char*)ap_info.ssid);
+        u8g2_DrawStr(&u8g2, 0, 24, line);
+
+        snprintf(line, sizeof(line), "RSSI: %d dBm", ap_info.rssi);
+        u8g2_DrawStr(&u8g2, 0, 36, line);
+
+        snprintf(line, sizeof(line), "CH: %d", ap_info.primary);
+        u8g2_DrawStr(&u8g2, 0, 48, line);
+
+        snprintf(line, sizeof(line), "IP: " IPSTR, IP2STR(&ip_info.ip));
+        u8g2_DrawStr(&u8g2, 0, 60, line);
     } else {
-        snprintf(buffer, sizeof(buffer), "Unknown Type");
+        u8g2_DrawStr(&u8g2, 0, 12, "WiFi not connected");
     }
 
-    u8g2_ClearBuffer(&u8g2);
-    u8g2_SetFont(&u8g2, u8g2_font_ncenB12_tr);
-    u8g2_DrawStr(&u8g2, 0, 15, "Message:");
-    u8g2_DrawStr(&u8g2, 0, 35, buffer);
     u8g2_SendBuffer(&u8g2);
 }
+        
+static void action_wifi(void) {
+    set_screen(SCREEN_WIFI);
+    update_screenf("WiFi: connecting...");
 
-// Menu draw functions
-static void draw_main_menu(void) {
-    u8g2_ClearBuffer(&u8g2);
-    u8g2_SetFont(&u8g2, u8g2_font_ncenB08_tr);
-    for (int i = 0; i < MAIN_MENU_COUNT; i++) {
-        if (i == current_selection) {
-            char line[32];
-            snprintf(line, sizeof(line), "> %s", main_menu_items[i]);
-            u8g2_DrawStr(&u8g2, 0, 10 + 12 * i, line);
-        } else {
-            u8g2_DrawStr(&u8g2, 10, 10 + 12 * i, main_menu_items[i]);
+    if (!wifi_connected) {
+        esp_err_t status = connect_wifi();
+        if (status != WIFI_SUCCESS) {
+            update_screenf("WiFi failed");
+            return;
         }
+        wifi_connected = true;
     }
-    u8g2_SendBuffer(&u8g2);
 }
 
-static void draw_settings_menu(void) {
+static void action_weather_mtl(void) {
+    if (wifi_connected) {
+        weather_fetch_city("Montreal", update_screenf);
+        set_screen(SCREEN_WEATHER_MTL);
+    } else {
+        update_screenf("WiFi failed");
+    }
+}
+
+// Generic menu draw helper
+static void draw_menu(const Menu* menu) {
     u8g2_ClearBuffer(&u8g2);
     u8g2_SetFont(&u8g2, u8g2_font_ncenB08_tr);
-    for (int i = 0; i < SETTINGS_MENU_COUNT; i++) {
-        if (i == settings_selection) {
+    for (int i = 0; i < menu->count; i++) {
+        if (i == *(menu->selected)) {
             char line[32];
-            snprintf(line, sizeof(line), "> %s", settings_menu_items[i]);
+            snprintf(line, sizeof(line), "> %s", menu->items[i].label);
             u8g2_DrawStr(&u8g2, 0, 10 + 12 * i, line);
         } else {
-            u8g2_DrawStr(&u8g2, 10, 10 + 12 * i, settings_menu_items[i]);
+            u8g2_DrawStr(&u8g2, 10, 10 + 12 * i, menu->items[i].label);
         }
     }
     u8g2_SendBuffer(&u8g2);
@@ -130,110 +174,86 @@ static void draw_settings_menu(void) {
 
 // Handling input
 static void handle_input(const uint8_t* data, int len) {
-    // If we’re in the main menu and not in “T&H”
-    if (!settings_active && !tnh_active) {
-        // Arrow keys for main menu
-        if (len >= 3 && data[0] == 0x1B && data[1] == '[') {
-            switch (data[2]) {
-                case 'A': // Up
-                    if (current_selection > 0) {
-                        current_selection--;
-                    }
-                    draw_main_menu();
-                    break;
-                case 'B': // Down
-                    if (current_selection < (MAIN_MENU_COUNT - 1)) {
-                        current_selection++;
-                    }
-                    draw_main_menu();
-                    break;
-            }
-        }
-        // Enter key
-        if (len == 1 && (data[0] == '\r' || data[0] == '\n')) {
-            if (current_selection == 1) { // "T&H"
-                tnh_active = true;
-            } else if (current_selection == 3) { // "Settings"
-                settings_active = true;
-                draw_settings_menu();
-            }
-        }
-    }
+    Key k = decode_key(data, len);
+    if (k == KEY_NONE) return;
 
-    // If settings menu is active 
-    else if (settings_active && !wifi_active && !bluetooth_active) {
-        // Arrow keys for settings menu
-        if (len >= 3 && data[0] == 0x1B && data[1] == '[') {
-            switch (data[2]) {
-                case 'A': // Up
-                    if (settings_selection > 0) {
-                        settings_selection--;
-                    }
-                    draw_settings_menu();
-                    break;
-                case 'B': // Down
-                    if (settings_selection < (SETTINGS_MENU_COUNT - 1)) {
-                        settings_selection++;
-                    }
-                    draw_settings_menu();
-                    break;
-            }
+    if (current_menu) {
+        if (k == KEY_UP && *(current_menu->selected) > 0) {
+            (*(current_menu->selected))--;
+            draw_menu(current_menu);
+        } else if (k == KEY_DOWN && *(current_menu->selected) < (current_menu->count - 1)) {
+            (*(current_menu->selected))++;
+            draw_menu(current_menu);
+        } else if (k == KEY_ENTER) {
+            MenuAction action = current_menu->items[*(current_menu->selected)].action;
+            if (action) action();
+        } else if (k == KEY_ESC) {
+            set_screen(SCREEN_MAIN);
         }
-        // Enter key in settings
-        if (len == 1 && (data[0] == '\r' || data[0] == '\n')) {
-            switch (settings_selection) {
-                case 0: // WiFi
-                    wifi_active = true;
-                    update_screen("WiFi Action", "string");
-                    break;
-                case 1: // Bluetooth
-                    bluetooth_active = true;
-                    update_screen("Bluetooth Action", "string");
-                    break;
-                case 2: // Back
-                    settings_active = false;
-                    draw_main_menu();
-                    break;
-            }
+    } else {
+        if (k == KEY_ESC) {
+            set_screen(SCREEN_MAIN);
         }
-    }
-    // Add new handling for WiFi submenu
-    else if (wifi_active) {
-        // Handle specific WiFi menu actions here
-        // For now, just prevent arrow keys from doing anything
-        
-        // You could add real functionality later:
-        // if (len >= 3 && data[0] == 0x1B && data[1] == '[') {
-        //     switch (data[2]) {
-        //         case 'A': // Up - do something
-        //         case 'B': // Down - do something
-        //     }
-        // }
-    }
-    // Add new handling for Bluetooth submenu
-    else if (bluetooth_active) {
-        // Handle specific Bluetooth menu actions here
-        // For now, just prevent arrow keys from doing anything
-    }
-
-    // ESC key - update to clear all submenu states
-    if (len == 1 && data[0] == 0x1B) {
-        tnh_active = false;
-        settings_active = false;
-        wifi_active = false;
-        bluetooth_active = false;
-        draw_main_menu();
     }
 }
+
+// Decodes Hex from buffer into keyboard keys
+static Key decode_key(const uint8_t* data, int len) {
+    if (len >= 3 && data[0] == 0x1B && data[1] == '[') {
+        if (data[2] == 'A') return KEY_UP;
+        if (data[2] == 'B') return KEY_DOWN;
+    }
+    if (len == 1 && (data[0] == '\r' || data[0] == '\n')) return KEY_ENTER;
+    if (len == 2 && data[0] == '\r' && data[1] == '\n') return KEY_ENTER;
+    if (len == 1 && data[0] == 0x1B) return KEY_ESC;
+    return KEY_NONE;
+}
+
+static void set_screen(Screen s) {
+    current_screen = s;
+    switch (s) {
+        case SCREEN_MAIN:
+            current_menu = &main_menu;
+            draw_menu(current_menu);
+            break;
+        case SCREEN_SETTINGS:
+            current_menu = &settings_menu;
+            draw_menu(current_menu);
+            break;
+        case SCREEN_WEATHER:
+            current_menu = &weather_menu;
+            draw_menu(current_menu);
+            break;
+        case SCREEN_TNH:
+            current_menu = NULL;
+            break;
+        case SCREEN_WEATHER_MTL:
+            current_menu = NULL;
+            break;
+        case SCREEN_WIFI:
+            current_menu = NULL;
+            update_screenf("WiFi Action");
+            break;
+        case SCREEN_BT:
+            current_menu = NULL;
+            update_screenf("Bluetooth Action");
+            break;
+    }
+}
+
+static void action_placeholder(void) { update_screenf("Not implemented"); }
+static void action_open_weather(void) { set_screen(SCREEN_WEATHER); }
+static void action_tnh(void) { set_screen(SCREEN_TNH); }
+static void action_open_settings(void) { set_screen(SCREEN_SETTINGS); }
+static void action_bt(void) { set_screen(SCREEN_BT); }
+static void action_back(void) { set_screen(SCREEN_MAIN); }
 
 // Main app
 void app_main(void) {
     i2c_master_init();
     u8g2_init();
     uart_init();
-    esp_err_t status = WIFI_FAILURE;
     
-    //initialize storage
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -243,37 +263,33 @@ void app_main(void) {
     
     // ble_init();
     
-    // connect to wireless AP
-	// status = connect_wifi();
-	// if (WIFI_SUCCESS != status)
-	// {
-	// 	ESP_LOGI(WIFI_TAG, "Failed to associate to AP, dying...");
-    //     update_screen("WiFi Failed", "string");
-	// 	// return;
-	// }
-    
     // connect to tcp server
-	// status = connect_tcp_server(update_screen);
+	// status = connect_tcp_server(update_screenf);
 	// if (TCP_SUCCESS != status)
 	// {
 	// 	ESP_LOGI(WIFI_TAG, "Failed to connect to remote server, dying...");
-    //     update_screen("TCP Failed", "string");
+    //     update_screenf("TCP Failed", "string");
 	// 	// return;
 	// }
-
-    draw_main_menu(); // Start on main menu
+    set_screen(SCREEN_MAIN); // Start on main menu
 
     uint8_t* data = (uint8_t*) malloc(BUF_SIZE);
     bool running = true;
     while (running) {
-        int len = uart_read_bytes(UART_NUM, data, (BUF_SIZE - 1), 20 / portTICK_PERIOD_MS);
+        int len = read(STDIN_FILENO, data, BUF_SIZE - 1);
+
         if (len > 0) {
             data[len] = '\0';
+            // ESP_LOGI("BUFFER", "len=%d data='%.*s'", len, len, (char*)data); Use this to grab required keys data
+            // ESP_LOG_BUFFER_HEX("BUFFER", data, len);
             handle_input(data, len);
         }
-        // Continuously update T&H if tnh_active
-        if (tnh_active) {
+
+        if (current_screen == SCREEN_TNH) {
             dht20_display(&u8g2);
+        }
+        if (current_screen == SCREEN_WIFI) {
+            draw_wifi_info();
         }
         vTaskDelay(pdMS_TO_TICKS(100));
 

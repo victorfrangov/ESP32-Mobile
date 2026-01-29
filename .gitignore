@@ -4,6 +4,7 @@ build/
 *.old
 wifi_config.h
 .cache/
+managed_components/
 
 # Ignore object files and binaries
 *.o

@@ -20,7 +20,7 @@
 #include "wifi_config.h"
 
 static const char *WIFI_TAG = "WIFI";
-typedef void (*screen_update_callback_t)(void *message, const char *type);
+typedef void (*update_screenf_callback_t)(const char* fmt, ...);
 
 typedef enum {
     WIFI_SUCCESS = 1 << 0,
@@ -33,7 +33,7 @@ typedef enum {
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 esp_err_t connect_wifi(void);
-esp_err_t connect_tcp_server(screen_update_callback_t update_screen);
-static void handle_server_data(int sock, screen_update_callback_t update_screen);
+// esp_err_t connect_tcp_server(update_screenf_callback_t update_screenf);
+// static void handle_server_data(int sock, update_screenf_callback_t update_screenf);
 
 #endif /* WIFI */
