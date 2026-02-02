@@ -58,6 +58,9 @@
 #define UART_NUM UART_NUM_0
 #define BUF_SIZE (1024)
 
+#define STATUS_BAR_H 10
+#define STATUS_BAR_UPDATE_MS 1000
+
 typedef enum {
     SCREEN_MAIN,
     SCREEN_SETTINGS,
@@ -93,36 +96,11 @@ typedef enum {
     KEY_ESC
 } Key;
 
-static void i2c_master_init(void);
-static void u8g2_init(void);
-static void uart_init(void);
 void update_screenf(const char* fmt, ...);
 void update_screenf_font(const uint8_t* font, const char* fmt, ...);
-static void weather_ui_update(const char* text, const char* icon);
-static void draw_wifi_info(void);
-static void draw_time(void);
-static void draw_geo(void);
-static void draw_wrapped_text(int x, int y, int max_w, const char* text);
-static void handle_input(const uint8_t* data, int len);
-static void go_back_one_menu(void);
-static void draw_wrapped_text_around_rect(int x, int y, int max_w,
-                                          int rx, int ry, int rw, int rh,
-                                          const char* text);
-void app_main(void);
+void weather_ui_update(const WeatherInfo* w);
 
-// Forward declarations
-static void set_screen(Screen s);
-static void action_placeholder(void);
-static void action_open_weather(void);
-static void action_tnh(void);
-static void action_time(void);
-static void action_weather_mtl(void);
-static void action_geo(void);
-static void action_open_settings(void);
-static void action_wifi(void);
-static void action_bt(void);
-static void action_back(void);
-static Key decode_key(const uint8_t* data, int len);
+void app_main(void);
 
 #endif /* MAIN */
 

@@ -43,6 +43,8 @@ const esp_ble_conn_params_t phy_1m_conn_params = {
 #define PROFILE_A_APP_ID    0
 #define INVALID_HANDLE      0
 
+static void ble_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
+
 struct gattc_profile_inst {
     esp_gattc_cb_t gattc_cb;
     uint16_t gattc_if;

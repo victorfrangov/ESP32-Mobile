@@ -4,8 +4,23 @@
 #include "wifi.h"
 #include "weather_icons.h"
 
+typedef struct {
+    bool ok;
+    char err[64];
+
+    int temp_c;
+    int feels_c;
+    int tmin_c;
+    int tmax_c;
+    unsigned hum_pct;
+    unsigned wind_kmh;
+
+    char desc[32];
+    char icon[4]; // e.g. "01d"
+} WeatherInfo;
+
 //define the callback here instead of in wifi.h
-typedef void (*weather_update_callback_t)(const char* text, const char* icon);
+typedef void (*weather_update_callback_t)(const WeatherInfo* w);
 
 esp_err_t weather_fetch_city(const char *city, weather_update_callback_t update_ui);
 

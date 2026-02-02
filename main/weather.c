@@ -56,6 +56,8 @@ esp_err_t weather_fetch_city(const char *city, weather_update_callback_t update_
         if (total >= 2048) break;
     }
 
+    WeatherInfo info = {0};
+
     if (total > 0) {
         buffer[total] = '\0';
 
@@ -89,32 +91,35 @@ esp_err_t weather_fetch_city(const char *city, weather_update_callback_t update_
                 strncpy(icon_code, icon->valuestring, sizeof(icon_code) - 1);
             }
             
-            int t  = (temp && cJSON_IsNumber(temp)) ? (int)lround(temp->valuedouble) : 0;
-            int f  = (feels && cJSON_IsNumber(feels)) ? (int)lround(feels->valuedouble) : 0;
-            int tn = (tmin && cJSON_IsNumber(tmin)) ? (int)lround(tmin->valuedouble) : 0;
-            int tx = (tmax && cJSON_IsNumber(tmax)) ? (int)lround(tmax->valuedouble) : 0;
-            unsigned int w  = (wspd && cJSON_IsNumber(wspd)) ? (int)lround(wspd->valuedouble * 3.6) : 0;
-            unsigned int h  = (hum && cJSON_IsNumber(hum)) ? hum->valueint : 0;
-            
-            char line1[64];
-            char line2[64];
+            info.ok = true;
+            info.temp_c  = (temp && cJSON_IsNumber(temp)) ? (int)lround(temp->valuedouble) : 0;
+            info.feels_c  = (feels && cJSON_IsNumber(feels)) ? (int)lround(feels->valuedouble) : 0;
+            info.tmin_c = (tmin && cJSON_IsNumber(tmin)) ? (int)lround(tmin->valuedouble) : 0;
+            info.tmax_c = (tmax && cJSON_IsNumber(tmax)) ? (int)lround(tmax->valuedouble) : 0;
+            info.wind_kmh  = (wspd && cJSON_IsNumber(wspd)) ? (int)lround(wspd->valuedouble * 3.6) : 0;
+            info.hum_pct  = (hum && cJSON_IsNumber(hum)) ? hum->valueint : 0;
 
-            snprintf(line1, sizeof(line1), "T:%iC F:%iC H:%u%%", t, f, h);
-            snprintf(line2, sizeof(line2), "Min:%iC Max:%iC W:%u KM/H %s", tn, tx, w, desc_buf);
+            strncpy(info.desc, desc_buf, sizeof(info.desc) - 1);
+            info.desc[sizeof(info.desc) - 1] = '\0';
 
-            char msg[128];
-            snprintf(msg, sizeof(msg), "%s\n%s", line1, line2);
+            strncpy(info.icon, icon_code, sizeof(info.icon) - 1);
+            info.icon[sizeof(info.icon) - 1] = '\0';
 
-            update_ui(msg, icon_code);
+            update_ui(&info);
 
             cJSON_Delete(root);
         } else {
-            update_ui("JSON parse error", "");
+            info.ok = false;
+            strncpy(info.err, "JSON parse error", sizeof(info.err) - 1);
+            info.err[sizeof(info.err) - 1] = '\0';
+            update_ui(&info);
         }
     } else {
-        update_ui("HTTP no body", "");
+        info.ok = false;
+        strncpy(info.err, "HTTP no body", sizeof(info.err) - 1);
+        info.err[sizeof(info.err) - 1] = '\0';
+        update_ui(&info);
     }
-
     free(buffer);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);

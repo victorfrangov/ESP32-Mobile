@@ -30,8 +30,6 @@ typedef enum {
     MAX_FAILURES = 10
 } wifi_status_t;
 
-static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
-static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 esp_err_t connect_wifi(void);
 // esp_err_t connect_tcp_server(update_screenf_callback_t update_screenf);
 // static void handle_server_data(int sock, update_screenf_callback_t update_screenf);

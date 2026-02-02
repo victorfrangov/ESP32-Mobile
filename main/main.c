@@ -1,4 +1,28 @@
 #include "main.h"
+#include "weather.h"
+
+static void i2c_master_init(void);
+static void u8g2_init(void);
+static void uart_init(void);
+static void draw_wifi_info(void);
+static void draw_time(void);
+static void draw_geo(void);
+static void draw_wrapped_text(int x, int y, int max_w, const char* text);
+static void handle_input(const uint8_t* data, int len);
+static void go_back_one_menu(void);
+static void set_screen(Screen s);
+static void status_bar_update_if_changed(void);
+static void draw_status_bar(void);
+static void action_placeholder(void);
+static void action_open_weather(void);
+static void action_tnh(void);
+static void action_time(void);
+static void action_weather_mtl(void);
+static void action_geo(void);
+static void action_open_settings(void);
+static void action_wifi(void);
+static void action_bt(void);
+static Key decode_key(const uint8_t* data, int len);
 
 // Menu state model
 static Screen current_screen = SCREEN_MAIN;
@@ -7,9 +31,12 @@ static const Menu* current_menu = NULL;
 static int main_selected = 0;
 static int weather_selected = 0;
 static int settings_selected = 0;
+static TickType_t s_last_status_tick = 0;
 static bool sntp_started = false;
 static bool wifi_connected = false;
 static GeoInfo geo_info = {0};
+static bool s_last_wifi_connected = false;
+static char s_last_bat_label[8] = "BAT?";
 
 // Main menu
 static const MenuItem main_menu_items[] = {
@@ -19,6 +46,7 @@ static const MenuItem main_menu_items[] = {
     { "Settings",    action_open_settings },
     { "Shutdown",    action_placeholder }
 };
+
 #define MAIN_MENU_COUNT (sizeof(main_menu_items) / sizeof(main_menu_items[0]))
 
 static const MenuItem weather_menu_items[] = {
@@ -31,8 +59,7 @@ static const MenuItem weather_menu_items[] = {
 static const MenuItem settings_menu_items[] = {
     { "WiFi",        action_wifi },
     { "Bluetooth",   action_bt },
-    { "Geolocation", action_geo },
-    { "Back",        action_back }
+    { "Geolocation", action_geo }
 };
 #define SETTINGS_MENU_COUNT (sizeof(settings_menu_items) / sizeof(settings_menu_items[0]))
 
@@ -91,11 +118,12 @@ static void update_screenf_font_v(const uint8_t* font, const char* fmt, va_list 
     vsnprintf(text, sizeof(text), fmt, args);
 
     u8g2_ClearBuffer(&u8g2);
+    draw_status_bar();
     u8g2_SetFont(&u8g2, font ? font : u8g2_font_ncenB08_tr);
 
     const int max_w = u8g2_GetDisplayWidth(&u8g2);
     const int line_h = (u8g2_GetAscent(&u8g2) - u8g2_GetDescent(&u8g2) + 2);
-    int y = u8g2_GetAscent(&u8g2);
+    int y = STATUS_BAR_H + u8g2_GetAscent(&u8g2) + 2;
 
     char line[64] = {0};
     char word[32] = {0};
@@ -107,6 +135,8 @@ static void update_screenf_font_v(const uint8_t* font, const char* fmt, va_list 
                 u8g2_DrawStr(&u8g2, 0, y, line);
                 y += line_h;
                 line[0] = '\0';
+            } else {
+                y += line_h; // blank line
             }
             p++;
             continue;
@@ -166,22 +196,53 @@ void update_screenf(const char* fmt, ...) {
     va_end(args);
 }
 
-static void weather_ui_update(const char* text, const char* icon) {
+void weather_ui_update(const WeatherInfo* w) {
     u8g2_ClearBuffer(&u8g2);
+    draw_status_bar();
+    u8g2_SetFont(&u8g2, u8g2_font_ncenB08_tr);
 
-    const WeatherIcon* ic = weather_bitmap_from_code(icon);
-    int rx = 0, ry = 0, rw = 0, rh = 0;
+    const int ascent = u8g2_GetAscent(&u8g2);
+    const int line_h = (u8g2_GetAscent(&u8g2) - u8g2_GetDescent(&u8g2)) + 2;
+    const int disp_w = u8g2_GetDisplayWidth(&u8g2);
 
-    if (ic) {
-        rw = ic->w;
-        rh = ic->h;
-        rx = u8g2_GetDisplayWidth(&u8g2) - rw;
-        ry = 0;
-        u8g2_DrawXBMP(&u8g2, rx, ry, ic->w, ic->h, ic->data);
+    // Icon top-right (below status bar)
+    int icon_x = disp_w; 
+    if (w && w->ok) {
+        const WeatherIcon* ic = weather_bitmap_from_code(w->icon);
+        if (ic) {
+            int rx = disp_w - ic->w - 1;
+            if (rx < 0) rx = 0;
+            icon_x = rx;
+            u8g2_DrawXBMP(&u8g2, rx, STATUS_BAR_H, ic->w, ic->h, ic->data);
+        }
     }
 
-    u8g2_SetFont(&u8g2, u8g2_font_ncenB08_tr);
-    draw_wrapped_text(0, 12, u8g2_GetDisplayWidth(&u8g2), text);
+    int y = STATUS_BAR_H + ascent;
+
+    if (!w || !w->ok) {
+        u8g2_DrawStr(&u8g2, 0, y, "Weather error"); y += line_h;
+        u8g2_DrawStr(&u8g2, 0, y, (w && w->err[0]) ? w->err : "No details");
+        u8g2_SendBuffer(&u8g2);
+        return;
+    }
+
+    char msg[192];
+    int n = snprintf(msg, sizeof(msg),
+        "T:%dC F:%dC\nH:%u%%\nMin:%dC Max:%dC\nW:%u KM/H\n%s",
+        w->temp_c, w->feels_c,
+        w->hum_pct,
+        w->tmin_c, w->tmax_c,
+        w->wind_kmh,
+        w->desc);
+    if (n >= (int)sizeof(msg)) {
+        /* truncated — handle if needed */
+    }
+    update_screenf("%s", msg);
+    
+    // Draw all text on the left
+    // If you want to guarantee it never overwrites the icon area, limit width to (icon_x - 2)
+    (void)icon_x; // keep if you don’t use it yet
+
 
     u8g2_SendBuffer(&u8g2);
 }
@@ -200,15 +261,13 @@ static void draw_wifi_info(void) {
 
     if (ap_ret == ESP_OK) {
         snprintf(msg, sizeof(msg),
-                 "WiFi CONNECTED\nSSID: %s\nRSSI: %d dBm\nCH: %d\nIP: " IPSTR,
+                 "WiFi CONNECTED\nSSID: %s\nRSSI: %d dBm\nIP: " IPSTR,
                  (char*)ap_info.ssid,
                  ap_info.rssi,
-                 ap_info.primary,
                  IP2STR(&ip_info.ip));
     } else {
         snprintf(msg, sizeof(msg), "WiFi not connected");
     }
-
     update_screenf("%s", msg);
 }
 
@@ -235,7 +294,13 @@ static void draw_time(void) {
         sntp_started = true;
     }
 
-    time_t now = time(NULL) + geo_info.offset_sec;
+    time_t n = time(NULL);
+    if (n < 1609459200) {
+        update_screenf("Time: syncing...");
+        return;
+    }
+
+    time_t now = n + geo_info.offset_sec;
     gmtime_r(&now, &timeinfo);
 
     char time_msg[64] = {0};
@@ -246,14 +311,31 @@ static void draw_time(void) {
 // Generic menu draw helper
 static void draw_menu(const Menu* menu) {
     u8g2_ClearBuffer(&u8g2);
+    draw_status_bar();
     u8g2_SetFont(&u8g2, u8g2_font_ncenB08_tr);
-    for (int i = 0; i < menu->count; i++) {
-        if (i == *(menu->selected)) {
+
+    const int row_h = 12;
+    const int top_y = STATUS_BAR_H + 10; // The bottom of the box.
+    const int max_rows = (u8g2_GetDisplayHeight(&u8g2) - STATUS_BAR_H) / row_h;
+    const int sel = *(menu->selected);
+
+    int start = 0;
+    if (sel >= max_rows) {
+        start = sel - (max_rows - 1);
+    }
+    if (start < 0) start = 0;
+
+    for (int i = 0; i < max_rows; i++) {
+        int idx = start + i;
+        if (idx >= menu->count) break;
+        int row_y = top_y + row_h * i;
+
+        if (idx == sel) {
             char line[32];
-            snprintf(line, sizeof(line), "> %s", menu->items[i].label);
-            u8g2_DrawStr(&u8g2, 0, 10 + 12 * i, line);
+            snprintf(line, sizeof(line), "> %s", menu->items[idx].label);
+            u8g2_DrawStr(&u8g2, 0, row_y, line);
         } else {
-            u8g2_DrawStr(&u8g2, 10, 10 + 12 * i, menu->items[i].label);
+            u8g2_DrawStr(&u8g2, 10, row_y, menu->items[idx].label);
         }
     }
     u8g2_SendBuffer(&u8g2);
@@ -420,13 +502,53 @@ static void draw_wrapped_text(int x, int y, int max_w, const char* text) {
     }
 }
 
+static void get_battery_label(char* out, size_t out_sz) {
+    // Placeholder until you have real battery data
+    snprintf(out, out_sz, "BAT?");
+}
+
+static void status_bar_update_if_changed(void) {
+    char bat[8];
+    get_battery_label(bat, sizeof(bat));
+    const bool wifi = wifi_connected;
+
+    if (wifi == s_last_wifi_connected && strcmp(bat, s_last_bat_label) == 0) {
+        return; // no change, no redraw
+    }
+
+    draw_status_bar();
+    u8g2_SendBuffer(&u8g2);
+}
+
+static void draw_status_bar(void) {
+    const int w = u8g2_GetDisplayWidth(&u8g2);
+
+    u8g2_SetDrawColor(&u8g2, 0);
+    u8g2_DrawBox(&u8g2, 0, 0, w, STATUS_BAR_H);
+    u8g2_SetDrawColor(&u8g2, 1);
+
+    u8g2_SetFont(&u8g2, u8g2_font_5x8_tr);
+    u8g2_DrawHLine(&u8g2, 0, STATUS_BAR_H - 1, w);
+
+    char bat[8];
+    get_battery_label(bat, sizeof(bat));
+    u8g2_DrawStr(&u8g2, 0, 8, bat);
+
+    // Right: WiFi status
+    const char* wifi = wifi_connected ? "WiFi:!!!" : "WiFi:---";
+    int wifi_w = u8g2_GetStrWidth(&u8g2, wifi);
+    u8g2_DrawStr(&u8g2, w - wifi_w, 8, wifi);
+
+    s_last_wifi_connected = wifi_connected;
+    strlcpy(s_last_bat_label, bat, sizeof(s_last_bat_label));
+}
+
 static void action_placeholder(void) { update_screenf("Not implemented"); }
 static void action_open_weather(void) { set_screen(SCREEN_WEATHER); }
 static void action_tnh(void) { set_screen(SCREEN_TNH); }
 static void action_time(void) { if (!wifi_connected) { update_screenf("WiFi required"); return; } set_screen(SCREEN_TIME); }
 static void action_open_settings(void) { set_screen(SCREEN_SETTINGS); }
 static void action_bt(void) { set_screen(SCREEN_BT); }
-static void action_back(void) { set_screen(SCREEN_MAIN); }
 static void action_geo(void) { set_screen(SCREEN_GEO); }
 static void action_wifi(void) {
     set_screen(SCREEN_WIFI);
@@ -439,6 +561,7 @@ static void action_wifi(void) {
             return;
         }
         wifi_connected = true;
+        status_bar_update_if_changed();
         geo_fetch_info("", &geo_info);
     }
 }
@@ -448,10 +571,9 @@ static void action_weather_mtl(void) {
         weather_fetch_city("Montreal", weather_ui_update);
         set_screen(SCREEN_WEATHER_MTL);
     } else {
-        weather_ui_update("WiFi failed", "");
+        update_screenf("WiFi connection failed");
     }
 }
-
 
 // Main app
 void app_main(void) {
@@ -487,6 +609,7 @@ void app_main(void) {
         if (current_screen == SCREEN_TIME) {
             draw_time();
         }
+
         vTaskDelay(pdMS_TO_TICKS(100));
 
         // Add a condition to exit the loop if needed SLEEP?

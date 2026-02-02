@@ -3,6 +3,9 @@
 static uint8_t tries = 0;
 static EventGroupHandle_t wifi_event_group;
 
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
+static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
+
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data){
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START){
         ESP_LOGI(WIFI_TAG, "Connecting to AP...");
