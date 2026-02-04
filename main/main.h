@@ -35,7 +35,6 @@
 #define BUF_SIZE (1024)
 
 #define STATUS_BAR_H            10
-#define STATUS_BAR_UPDATE_MS    1000
 
 typedef enum {
     SCREEN_MAIN,
