@@ -18,7 +18,7 @@ typedef struct {
     unsigned hum_pct;
     unsigned wind_kmh;
 
-    char desc[32];
+    char desc[48];
 } WeatherInfo;
 
 //define the callback here instead of in wifi.h

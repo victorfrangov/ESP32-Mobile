@@ -1,22 +1,28 @@
 #include "main.h"
 #include "esp_system.h"
+#include "freertos/idf_additions.h"
 #include "freertos/projdefs.h"
 #include "geolocation.h"
 #include "u8g2.h"
 #include "wifi.h"
+#include <stdint.h>
+#include "snake.h"
 
+// Drawing functions
 static void draw_wifi_info(void);
 static void draw_time(void);
 static void draw_geo(void);
-// static void draw_wrapped_text(int x, int y, int max_w, const char* text);
-static void handle_input(const uint8_t* data, int len);
-static void set_screen(Screen s);
-static void status_bar_update_if_changed(void);
+static void draw_status_bar(void);
+static void draw_wifi_bars(const int w, const int bars);
+
+// Actions
 static void action_games(void);
 static void action_open_weather(void);
 static void action_tnh(void);
 static void action_time(void);
 static void action_weather_mtl(void);
+static void action_weather_nyc(void);
+static void action_weather_lausanne(void);
 static void action_geo(void);
 static void action_open_settings(void);
 static void action_wifi(void);
@@ -24,14 +30,11 @@ static void action_reset_wifi(void);
 static void action_power(void);
 static void action_shutdown(void);
 static void action_restart(void);
-static Key decode_key(uint8_t b);
-static void weather_ui_update(const WeatherInfo* w);
-static void log_mem_usage(void);
-static int get_wifi_bars(void);
-static void draw_status_bar(void);
-static void draw_wifi_bars(const int w, const int bars);
+static void action_flappybird(void);
+static void action_snake(void);
+static void action_minesweeper(void);
 
-
+// Nav LIFO stack
 static Screen s_nav_stack[MAX_NAV_DEPTH];
 static int s_nav_top = -1; // -1 means empty stack
 
@@ -39,42 +42,44 @@ static int s_nav_top = -1; // -1 means empty stack
 static Screen current_screen = SCREEN_MAIN;
 static const Menu* current_menu = NULL;
 
+// Menu cursor. Which menu is selected?
 static int main_selected = 0;
 static int weather_selected = 0;
 static int settings_selected = 0;
 static int games_selected = 0;
 static int power_selected = 0;
 
-static bool sntp_started = false;
+static bool sntp_started = false; // Time server
 static GeoInfo geo_info = {0};
 static bool s_last_wifi_connected = false;
 static char s_last_bat_label[8] = "BAT?";
 static int s_last_wifi_bars = -1;
 
-// Main menu
 static const MenuItem main_menu_items[] = {
     { "Games",       action_games },
     { "Weather",     action_open_weather },
     { "Time",        action_time },
     { "Settings",    action_open_settings },
-    { "Power",    action_power }
+    { "Power",       action_power }
 };
 
 static const MenuItem weather_menu_items[] = {
-    { "Here", action_tnh },
-    { "Montreal", action_weather_mtl }
+    { "Here",           action_tnh },
+    { "Montreal",       action_weather_mtl },
+    { "New York City",  action_weather_nyc },
+    { "Lausanne",       action_weather_lausanne }
 };
 
 static const MenuItem settings_menu_items[] = {
     { "WiFi Info",        action_wifi },
     { "Reset WiFi",       action_reset_wifi },
-    { "Geolocation", action_geo }
+    { "Geolocation",      action_geo }
 };
 
 static const MenuItem games_menu_items[] = {
-    { "Flappy Bird",     action_open_weather },
-    { "Snake",           action_open_weather },
-    { "Minesweeper",     action_open_weather }
+    { "Flappy Bird",     action_flappybird },
+    { "Snake",           action_snake },
+    { "Minesweeper",     action_minesweeper }
 };
 
 static const MenuItem power_menu_items[] = {
@@ -119,7 +124,7 @@ static void u8g2_init(void) {
 
     u8g2_esp32_hal_init(u8g2_esp32_hal);
 
-    u8g2_Setup_ssd1309_128x64_noname2_f(&u8g2, U8G2_R0, u8g2_esp32_spi_byte_cb, u8g2_esp32_gpio_and_delay_cb);
+    u8g2_Setup_ssd1309_128x64_noname0_f(&u8g2, U8G2_R0, u8g2_esp32_spi_byte_cb, u8g2_esp32_gpio_and_delay_cb);
     u8g2_InitDisplay(&u8g2);
     u8g2_SetPowerSave(&u8g2, 0);
 }
@@ -249,14 +254,13 @@ static void weather_ui_update(const WeatherInfo* w) {
         return;
     }
 
-    char msg[64];
+    char msg[128];
     int n = snprintf(msg, sizeof(msg),
-        "T:%dC F:%dC H:%u%%\nMin:%dC Max:%dC\nW:%u KM/H\n%.*s",
+        "T:%dC F:%dC H:%u%%\nMin:%dC Max:%dC\nW:%u KM/H\n%s",
         w->temp_c, w->feels_c,
         w->hum_pct,
         w->tmin_c, w->tmax_c,
         w->wind_kmh,
-        24,               // limit desc to 24 chars
         w->desc);
     ESP_LOGI("temp", "%d", n);
     if (n >= (int)sizeof(msg)) {
@@ -359,14 +363,49 @@ static void draw_menu(const Menu* menu) {
     u8g2_SendBuffer(&u8g2);
 }
 
+static Key decode_key(uint8_t b) {
+    static int esc_state = 0;
+
+    if (esc_state == 0) {
+        if (b == 0x1B) { esc_state = 1; return KEY_NONE; }
+        if (b == '\r' || b == '\n') return KEY_ENTER;
+        
+        // WASD keys (instant response, great for games)
+        if (b == 'w' || b == 'W') return KEY_UP;
+        if (b == 's' || b == 'S') return KEY_DOWN;
+        if (b == 'a' || b == 'A') return KEY_LEFT;
+        if (b == 'd' || b == 'D') return KEY_RIGHT;
+
+        return KEY_NONE;
+    }
+
+    if (esc_state == 1) {
+        if (b == '[') { esc_state = 2; return KEY_NONE; }
+        esc_state = 0;
+        return KEY_ESC;
+    }
+
+    // esc_state == 2 (Arrow key final byte)
+    esc_state = 0;
+    if (b == 'A') return KEY_UP;
+    if (b == 'B') return KEY_DOWN;
+    if (b == 'C') return KEY_RIGHT;
+    if (b == 'D') return KEY_LEFT;
+
+    return KEY_NONE;
+}
+
 // Handling input
 static void handle_input(const uint8_t* data, int len) {
     for (int i = 0; i < len; i++) {
         Key k = decode_key(data[i]);
         if (k == KEY_NONE) continue;
 
-        // -- Global keys --
-        if (k == KEY_LEFT) {
+        // -- Global keys -- (Can cleanup is_game_screen helper function)
+        if (k == KEY_LEFT && 
+            current_screen != SCREEN_SNAKE && 
+            current_screen != SCREEN_MINESWEEPER && 
+            current_screen != SCREEN_FLAPPYBIRD) {
             nav_pop();
             continue;
         }
@@ -388,31 +427,11 @@ static void handle_input(const uint8_t* data, int len) {
                 if (action) action();
             }
         }
+
+        if (current_screen == SCREEN_SNAKE){
+            snake_handle_input(k);
+        }
     }
-}
-
-static Key decode_key(uint8_t b) {
-    static int esc_state = 0;
-
-    if (esc_state == 0) {
-        if (b == 0x1B) { esc_state = 1; return KEY_NONE; }
-        if (b == '\r' || b == '\n') return KEY_ENTER;
-        return KEY_NONE;
-    }
-
-    if (esc_state == 1) {
-        if (b == '[') { esc_state = 2; return KEY_NONE; }
-        esc_state = 0;
-        return KEY_ESC;
-    }
-
-    // esc_state == 2
-    esc_state = 0;
-    if (b == 'A') return KEY_UP;
-    if (b == 'B') return KEY_DOWN;
-    if (b == 'C') return KEY_RIGHT;
-    if (b == 'D') return KEY_LEFT;
-    return KEY_NONE;
 }
 
 static void set_screen(Screen s) {
@@ -569,7 +588,7 @@ static void wifi_connect_task(void *pvParameters) {
 
 static void weather_fetch_task(void *pvParameters) {
     const char* city = (const char*)pvParameters;
-    weather_fetch_city(city ? city : "Montreal", weather_ui_update);
+    weather_fetch_city(city, weather_ui_update);
     vTaskDelete(NULL);
 }
 
@@ -581,8 +600,10 @@ static void geo_fetch_task(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-static void action_games(void) {nav_push(SCREEN_GAMES); }
-static void action_placeholder(void) { update_screenf("Not implemented"); }
+static void action_flappybird(void) {nav_push(SCREEN_FLAPPYBIRD); }
+static void action_snake(void) { nav_push(SCREEN_SNAKE); snake_init(); }
+static void action_minesweeper(void) { nav_push(SCREEN_MINESWEEPER); }
+static void action_games(void) { nav_push(SCREEN_GAMES); }
 static void action_open_weather(void) { nav_push(SCREEN_WEATHER); }
 static void action_tnh(void) { nav_push(SCREEN_TNH); }
 static void action_open_settings(void) { nav_push(SCREEN_SETTINGS); }
@@ -633,18 +654,36 @@ static void action_wifi(void) {
         draw_wifi_info();
     }
 }
-
 static void action_weather_mtl(void) {
     nav_push(SCREEN_WEATHER_MTL);
     if (!wifi_is_connected()) {
         update_screenf("WiFi connection failed");
         return;
-    } 
+    }
     
     update_screenf("Loading weather...");
-    xTaskCreate(weather_fetch_task, "weather_task", 4096, "Montreal", 5, NULL);
+    xTaskCreate(weather_fetch_task, "weather_task_mtl", 4096, "Montreal", 5, NULL);
 }
+static void action_weather_nyc(void) {
+    nav_push(SCREEN_WEATHER_NYC);
+    if(!wifi_is_connected()) {
+        update_screenf("WiFi connection failed");
+        return;
+    }
 
+    update_screenf("Loading weather...");
+    xTaskCreate(weather_fetch_task, "weather_task_nyc", 4096, "Manhattan", 5, NULL);
+}
+static void action_weather_lausanne(void) {
+    nav_push(SCREEN_WEATHER_LAUSANNE);
+    if(!wifi_is_connected()) {
+        update_screenf("WiFi connection failed");
+        return;
+    }
+
+    update_screenf("Loading weather...");
+    xTaskCreate(weather_fetch_task, "weather_task_lausanne", 4096, "Lausanne", 5, NULL);
+}
 static void action_reset_wifi(void){
     update_screenf("Resetting Wi-Fi...\nRestarting device");
     wifi_reset_provisioning();
@@ -674,32 +713,35 @@ void app_main(void) {
     u8g2_init();
     uart_init();
     nvs_init();
-
     nav_reset(); // Start on main menu
-
     wifi_init();
 
     uint8_t* data = (uint8_t*) malloc(BUF_SIZE);
     bool running = true;
-    while (running) {
-        int len = read(STDIN_FILENO, data, BUF_SIZE - 1);
+    static uint32_t last_redraw = 0;
 
+    while (running) {
+
+        // Eventually
+        // int len = uart_read_bytes(UART_NUM, data, BUF_SIZE - 1, pdMS_TO_TICKS(20));
+
+        int len = read(STDIN_FILENO, data, BUF_SIZE - 1);
         if (len > 0) {
             data[len] = '\0';
             handle_input(data, len);
         }
 
-        if (current_screen == SCREEN_TNH) {
-            draw_dht20();
+        // Throttle live screen redraws to every 500ms so we don't spam SPI
+        uint32_t now = xTaskGetTickCount();
+        if (now - last_redraw >= pdMS_TO_TICKS(500)) {
+            last_redraw = now;
+            if (current_screen == SCREEN_TNH)  draw_dht20();
+            if (current_screen == SCREEN_WIFI) draw_wifi_info();
+            if (current_screen == SCREEN_TIME) draw_time();
         }
-        if (current_screen == SCREEN_WIFI) {
-            draw_wifi_info();
-        }
-        if (current_screen == SCREEN_TIME) {
-            draw_time();
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(100));
+        if (current_screen == SCREEN_SNAKE) { snake_draw(); snake_update(); }
+    
+    vTaskDelay(pdMS_TO_TICKS(10));
     }
     free(data);
 }

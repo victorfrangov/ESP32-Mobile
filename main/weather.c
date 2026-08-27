@@ -2,6 +2,7 @@
 #include "esp_crt_bundle.h"
 
 #define WEATHER_API_KEY API_KEY
+#define WEATHER_BUF_SIZE 1024
 
 static void capitalize_first(char *s) {
     if (s && s[0] >= 'a' && s[0] <= 'z') {
@@ -46,7 +47,7 @@ esp_err_t weather_fetch_city(const char *city, weather_update_callback_t update_
     int status = esp_http_client_get_status_code(client);
     ESP_LOGI("weather", "status=%d, content_len=%lld", status, clen);
 
-    char *buffer = calloc(1, 2048 + 1);
+    char *buffer = calloc(1, WEATHER_BUF_SIZE + 1);
     if (!buffer) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
@@ -55,11 +56,13 @@ esp_err_t weather_fetch_city(const char *city, weather_update_callback_t update_
 
     int total = 0;
     while (1) {
-        int r = esp_http_client_read(client, buffer + total, 2048 - total);
+        int r = esp_http_client_read(client, buffer + total, WEATHER_BUF_SIZE - total);
         if (r <= 0) break;
         total += r;
-        if (total >= 2048) break;
+        if (total >= WEATHER_BUF_SIZE) break;
     }
+
+    ESP_LOGI("weather", "payload received: %d / %d bytes", total, WEATHER_BUF_SIZE);
 
     WeatherInfo info = {0};
 
@@ -92,6 +95,7 @@ esp_err_t weather_fetch_city(const char *city, weather_update_callback_t update_
             cJSON *w0 = (weather && cJSON_IsArray(weather)) ? cJSON_GetArrayItem(weather, 0) : NULL;
             cJSON *desc = w0 ? cJSON_GetObjectItem(w0, "description") : NULL;
 
+            // if desc it Heavy intensity rain, the 'n' is cuttof
             const char* desc_str = cJSON_GetStringValue(desc);
             strlcpy(info.desc, desc_str ? desc_str : "", sizeof(info.desc));
             capitalize_first(info.desc);

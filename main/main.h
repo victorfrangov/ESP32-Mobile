@@ -44,12 +44,17 @@ typedef enum {
     SCREEN_SETTINGS,
     SCREEN_WEATHER,
     SCREEN_WEATHER_MTL,
+    SCREEN_WEATHER_NYC,
+    SCREEN_WEATHER_LAUSANNE,
     SCREEN_TIME,
     SCREEN_TNH,
     SCREEN_WIFI,
     SCREEN_GEO,
     SCREEN_GAMES,
-    SCREEN_POWER
+    SCREEN_POWER,
+    SCREEN_FLAPPYBIRD,
+    SCREEN_SNAKE,
+    SCREEN_MINESWEEPER
 } Screen;
 
 typedef void (*MenuAction)(void);
@@ -75,9 +80,12 @@ typedef enum {
     KEY_ESC
 } Key;
 
+extern u8g2_t u8g2;
+
 void nav_push(Screen next);
 void nav_pop(void);
 void nav_reset(void);
+
 void update_screenf(const char* fmt, ...);
 void update_screenf_font(const uint8_t* font, const char* fmt, ...);
 

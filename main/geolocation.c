@@ -1,13 +1,12 @@
 #include "geolocation.h"
-#include "esp_crt_bundle.h"
 
 static const char* TAG = "GEO";
+#define GEO_BUF_SIZE 256
 
 static bool geo_fetch_once(const char* url, GeoInfo* out) {
     esp_http_client_config_t cfg = {
         .url = url,
         .timeout_ms = 5000,
-        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
@@ -38,7 +37,7 @@ static bool geo_fetch_once(const char* url, GeoInfo* out) {
         return false;
     }
 
-    char buf[512];
+    char buf[GEO_BUF_SIZE];
     int len = esp_http_client_read(client, buf, sizeof(buf) - 1);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
@@ -48,6 +47,8 @@ static bool geo_fetch_once(const char* url, GeoInfo* out) {
         return false;
     }
     buf[len] = '\0';
+
+    ESP_LOGI(TAG, "Payload received: %d / %d bytes", len, GEO_BUF_SIZE);
 
     cJSON* root = cJSON_Parse(buf);
     if (!root) {

@@ -6,14 +6,17 @@
 
 ## From post note
 
-- Weather Icons
-- BL
-- Games
-- Shutdown
-- Time
-- GPS, Speaker?
-- Gamepad
-- Case
-- Battery
-- Stream music to speaker?
-- Multi-city weather
+- Weather Icons (NO)
+- BL (NO)
+- Games (Doing currently)
+- Shutdown (Done)
+- Multi-city weather (done)
+
+### Not done yet
+
+- Time (Done, add to status bar?)
+- GPS, Speaker? (on hold)
+- Gamepad (on hold)
+- Case (on hold)
+- Battery (on hold)
+- Stream music to speaker? (on hold)

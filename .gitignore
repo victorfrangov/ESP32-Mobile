@@ -3,6 +3,7 @@ build/
 u8g2/
 *.old
 .cache/
+components/
 managed_components/
 main/secrets.h
 *.projbuild
