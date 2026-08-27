@@ -1,17 +1,18 @@
 #include "main.h"
+#include "esp_system.h"
+#include "freertos/projdefs.h"
+#include "geolocation.h"
+#include "u8g2.h"
+#include "wifi.h"
 
-static void i2c_master_init(void);
-static void u8g2_init(void);
-static void uart_init(void);
 static void draw_wifi_info(void);
 static void draw_time(void);
 static void draw_geo(void);
 // static void draw_wrapped_text(int x, int y, int max_w, const char* text);
 static void handle_input(const uint8_t* data, int len);
-static void go_back_one_menu(void);
 static void set_screen(Screen s);
 static void status_bar_update_if_changed(void);
-static void action_placeholder(void);
+static void action_games(void);
 static void action_open_weather(void);
 static void action_tnh(void);
 static void action_time(void);
@@ -19,15 +20,20 @@ static void action_weather_mtl(void);
 static void action_geo(void);
 static void action_open_settings(void);
 static void action_wifi(void);
-static void action_bt(void);
+static void action_reset_wifi(void);
+static void action_power(void);
+static void action_shutdown(void);
+static void action_restart(void);
 static Key decode_key(uint8_t b);
 static void weather_ui_update(const WeatherInfo* w);
 static void log_mem_usage(void);
 static int get_wifi_bars(void);
 static void draw_status_bar(void);
-// static void draw_bt_devices(void);
 static void draw_wifi_bars(const int w, const int bars);
 
+
+static Screen s_nav_stack[MAX_NAV_DEPTH];
+static int s_nav_top = -1; // -1 means empty stack
 
 // Menu state model
 static Screen current_screen = SCREEN_MAIN;
@@ -36,8 +42,10 @@ static const Menu* current_menu = NULL;
 static int main_selected = 0;
 static int weather_selected = 0;
 static int settings_selected = 0;
+static int games_selected = 0;
+static int power_selected = 0;
+
 static bool sntp_started = false;
-static bool wifi_connected = false;
 static GeoInfo geo_info = {0};
 static bool s_last_wifi_connected = false;
 static char s_last_bat_label[8] = "BAT?";
@@ -45,32 +53,46 @@ static int s_last_wifi_bars = -1;
 
 // Main menu
 static const MenuItem main_menu_items[] = {
-    { "Games",       action_placeholder },
+    { "Games",       action_games },
     { "Weather",     action_open_weather },
     { "Time",        action_time },
     { "Settings",    action_open_settings },
-    { "Shutdown",    action_placeholder }
+    { "Power",    action_power }
 };
-
-#define MAIN_MENU_COUNT (sizeof(main_menu_items) / sizeof(main_menu_items[0]))
 
 static const MenuItem weather_menu_items[] = {
     { "Here", action_tnh },
     { "Montreal", action_weather_mtl }
 };
-#define WEATHER_MENU_COUNT (sizeof(weather_menu_items) / sizeof(weather_menu_items[0]))
 
-// Settings submenu
 static const MenuItem settings_menu_items[] = {
-    { "WiFi",        action_wifi },
-    { "Bluetooth",   action_bt },
+    { "WiFi Info",        action_wifi },
+    { "Reset WiFi",       action_reset_wifi },
     { "Geolocation", action_geo }
 };
+
+static const MenuItem games_menu_items[] = {
+    { "Flappy Bird",     action_open_weather },
+    { "Snake",           action_open_weather },
+    { "Minesweeper",     action_open_weather }
+};
+
+static const MenuItem power_menu_items[] = {
+    { "Shutdown",        action_shutdown },
+    { "Restart",         action_restart  }
+};
+
+#define MAIN_MENU_COUNT (sizeof(main_menu_items) / sizeof(main_menu_items[0]))
+#define WEATHER_MENU_COUNT (sizeof(weather_menu_items) / sizeof(weather_menu_items[0]))
 #define SETTINGS_MENU_COUNT (sizeof(settings_menu_items) / sizeof(settings_menu_items[0]))
+#define GAMES_MENU_COUNT (sizeof(games_menu_items) / sizeof(games_menu_items[0]))
+#define POWER_MENU_COUNT (sizeof(power_menu_items) / sizeof(power_menu_items[0]))
 
 static const Menu main_menu = { main_menu_items, MAIN_MENU_COUNT, &main_selected };
 static const Menu weather_menu = { weather_menu_items, WEATHER_MENU_COUNT, &weather_selected };
 static const Menu settings_menu = { settings_menu_items, SETTINGS_MENU_COUNT, &settings_selected };
+static const Menu games_menu = { games_menu_items, GAMES_MENU_COUNT, &games_selected };
+static const Menu power_menu = { power_menu_items, POWER_MENU_COUNT, &power_selected };
 
 u8g2_t u8g2;
 
@@ -116,6 +138,15 @@ static void uart_init(void) {
     uart_param_config(UART_NUM, &uart_config);
     //Set UART pins (using UART0 default pins)
     uart_set_pin(UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+}
+
+static void nvs_init(void){
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
 }
 
 static void update_screenf_font_v(const uint8_t* font, const char* fmt, va_list args) {
@@ -208,7 +239,6 @@ static void weather_ui_update(const WeatherInfo* w) {
 
     const int ascent = u8g2_GetAscent(&u8g2);
     const int line_h = (u8g2_GetAscent(&u8g2) - u8g2_GetDescent(&u8g2)) + 2;
-    // const int disp_w = u8g2_GetDisplayWidth(&u8g2);
 
     int y = STATUS_BAR_H + ascent;
 
@@ -229,7 +259,6 @@ static void weather_ui_update(const WeatherInfo* w) {
         24,               // limit desc to 24 chars
         w->desc);
     ESP_LOGI("temp", "%d", n);
-    log_mem_usage();
     if (n >= (int)sizeof(msg)) {
         // truncated (still safe)
     }
@@ -273,7 +302,7 @@ static void draw_geo(void) {
 
 static void draw_time(void) {
     struct tm timeinfo = {0};
-    if (!wifi_connected) return; // Guard, not really needed.
+    if (!wifi_is_connected()) return; // Guard, not really needed.
 
     if (!sntp_started) {
         const char* ntpServer = "pool.ntp.org";
@@ -332,21 +361,21 @@ static void draw_menu(const Menu* menu) {
 
 // Handling input
 static void handle_input(const uint8_t* data, int len) {
-    if (len > 0) {
-        char hex[128] = {0};
-        int pos = 0;
-        for (int i = 0; i < len && pos < (int)sizeof(hex) - 4; i++) {
-            pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", data[i]);
-        }
-    }
     for (int i = 0; i < len; i++) {
         Key k = decode_key(data[i]);
         if (k == KEY_NONE) continue;
+
+        // -- Global keys --
         if (k == KEY_LEFT) {
-            go_back_one_menu();
+            nav_pop();
+            continue;
+        }
+        if (k == KEY_ESC){
+            nav_reset();
             continue;
         }
 
+        // -- Menu-only keys --
         if (current_menu) {
             if (k == KEY_UP && *(current_menu->selected) > 0) {
                 (*(current_menu->selected))--;
@@ -357,35 +386,8 @@ static void handle_input(const uint8_t* data, int len) {
             } else if (k == KEY_ENTER || k == KEY_RIGHT) {
                 MenuAction action = current_menu->items[*(current_menu->selected)].action;
                 if (action) action();
-            } else if (k == KEY_ESC) {
-                set_screen(SCREEN_MAIN);
-            }
-        } else {
-            if (k == KEY_ESC) {
-                set_screen(SCREEN_MAIN);
             }
         }
-    }
-}
-
-static void go_back_one_menu(void) {
-    switch (current_screen) {
-        case SCREEN_SETTINGS:
-        case SCREEN_WEATHER:
-        case SCREEN_TIME:
-            set_screen(SCREEN_MAIN);
-            break;
-        case SCREEN_WIFI:
-        case SCREEN_BT:
-        case SCREEN_GEO:
-            set_screen(SCREEN_SETTINGS);
-            break;
-        case SCREEN_TNH:
-        case SCREEN_WEATHER_MTL:
-            set_screen(SCREEN_WEATHER);
-            break;
-        default:
-            break;
     }
 }
 
@@ -428,88 +430,46 @@ static void set_screen(Screen s) {
             current_menu = &weather_menu;
             draw_menu(current_menu);
             break;
-        case SCREEN_TNH:
-            current_menu = NULL;
-            break;
-        case SCREEN_TIME:
-            current_menu = NULL;
-            break;
-        case SCREEN_WEATHER_MTL:
-            current_menu = NULL;
-            break;
-        case SCREEN_WIFI:
-            current_menu = NULL;
-            break;
-        case SCREEN_BT:
-            current_menu = NULL;
-            update_screenf("Bluetooth Action");
-            // ble_scan_start();
-            // draw_bt_devices();
-            break;
         case SCREEN_GEO:
             current_menu = NULL;
             draw_geo();
             break;
+        case SCREEN_GAMES:
+            current_menu = &games_menu;
+            draw_menu(current_menu);
+            break;
+        case SCREEN_POWER:
+            current_menu = &power_menu;
+            draw_menu(current_menu);
+            break;
+        default:
+            current_menu = NULL;
+            break;
     }
 }
 
-// static void draw_wrapped_text(int x, int y, int max_w, const char* text) {
-//     const int line_h = (u8g2_GetAscent(&u8g2) - u8g2_GetDescent(&u8g2)) + 2;
-//     char line[64] = {0};
-//     char word[64] = {0};
-//     const char* p = text;
-//
-//     while (*p) {
-//         if (*p == '\n') {
-//             if (line[0]) {
-//                 u8g2_DrawStr(&u8g2, x, y, line);
-//                 y += line_h;
-//                 line[0] = '\0';
-//             } else {
-//                 y += line_h; // blank line
-//             }
-//             p++;
-//             continue;
-//         }
-//
-//         while (*p == ' ') p++;
-//
-//         int wi = 0;
-//         while (*p && *p != ' ' && *p != '\n' && wi < (int)sizeof(word) - 1) {
-//             word[wi++] = *p++;
-//         }
-//         word[wi] = '\0';
-//         if (!word[0]) break;
-//
-//         char trial[64];
-//         if (line[0]) {
-//             strlcpy(trial, line, sizeof(trial));
-//             strlcat(trial, " ", sizeof(trial));
-//             strlcat(trial, word, sizeof(trial));
-//         } else {
-//             strlcpy(trial, word, sizeof(trial));
-//         }
-//
-//         if (u8g2_GetStrWidth(&u8g2, trial) <= max_w) {
-//             strlcpy(line, trial, sizeof(line));
-//             continue;
-//         }
-//
-//         if (line[0]) {
-//             u8g2_DrawStr(&u8g2, x, y, line);
-//             y += line_h;
-//             line[0] = '\0';
-//         } else {
-//             // Single long word: draw anyway
-//             u8g2_DrawStr(&u8g2, x, y, word);
-//             y += line_h;
-//         }
-//     }
-//
-//     if (line[0]) {
-//         u8g2_DrawStr(&u8g2, x, y, line);
-//     }
-// }
+void nav_push(Screen next){
+    if (s_nav_top < MAX_NAV_DEPTH - 1){
+        s_nav_top++;
+        s_nav_stack[s_nav_top] = next;
+        set_screen(next);
+    } else {
+        ESP_LOGW("NAV", "Stack overflow! Cannot push to screen %d", next);
+    }
+}
+
+void nav_pop(void){
+    if (s_nav_top > 0){
+        s_nav_top--;
+        set_screen(s_nav_stack[s_nav_top]);
+    }
+}
+
+void nav_reset(void){
+    s_nav_top = 0;
+    s_nav_stack[0] = SCREEN_MAIN;
+    set_screen(SCREEN_MAIN);
+}
 
 static void get_battery_label(char* out, size_t out_sz) {
     // Placeholder until you have real battery data
@@ -517,7 +477,7 @@ static void get_battery_label(char* out, size_t out_sz) {
 }
 
 static int get_wifi_bars(void) {
-    if (!wifi_connected) return 0;
+    if (!wifi_is_connected()) return 0;
 
     wifi_ap_record_t ap_info = {0};
     if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) {
@@ -553,16 +513,10 @@ static void draw_wifi_bars(const int w, const int bars) {
     }
 }
 
-// static void draw_bt_devices(void) {
-//     char msg[192] = {0};
-//     ble_get_devices_text(msg, sizeof(msg));
-//     update_screenf("%s", msg);
-// }
-
 static void status_bar_update_if_changed(void) {
     char bat[8];
     get_battery_label(bat, sizeof(bat));
-    const bool wifi = wifi_connected;
+    const bool wifi = wifi_is_connected();
     const int bars = get_wifi_bars();
 
     if (wifi == s_last_wifi_connected &&
@@ -593,75 +547,137 @@ static void draw_status_bar(void) {
     // Right: WiFi bars
     draw_wifi_bars(w, bars);
 
-    s_last_wifi_connected = wifi_connected;
+    s_last_wifi_connected = wifi_is_connected();
     s_last_wifi_bars = bars;
     strlcpy(s_last_bat_label, bat, sizeof(s_last_bat_label));
 }
 
-static void action_placeholder(void) { update_screenf("Not implemented"); }
-static void action_open_weather(void) { set_screen(SCREEN_WEATHER); }
-static void action_tnh(void) { set_screen(SCREEN_TNH); }
-static void action_time(void) { if (!wifi_connected) { update_screenf("WiFi required"); return; } set_screen(SCREEN_TIME); }
-static void action_open_settings(void) { set_screen(SCREEN_SETTINGS); }
-static void action_bt(void) { set_screen(SCREEN_BT); }
-static void action_geo(void) { set_screen(SCREEN_GEO); }
-static void action_wifi(void) {
-    set_screen(SCREEN_WIFI);
-    update_screenf("WiFi: connecting...");
-
-    if (!wifi_connected) {
-        esp_err_t status = connect_wifi();
-        if (status != WIFI_SUCCESS) {
-            update_screenf("WiFi connection failed");
-            return;
+static void wifi_connect_task(void *pvParameters) {
+    esp_err_t status = connect_wifi();
+    if (status == WIFI_SUCCESS) {
+        if (current_screen == SCREEN_WIFI) {
+            draw_wifi_info();
         }
-        wifi_connected = true;
-        status_bar_update_if_changed();
-        geo_fetch_info("", &geo_info);
+    } else {
+        if (current_screen == SCREEN_WIFI) {
+            update_screenf("WiFi connection failed");
+        }
+    }
+    status_bar_update_if_changed();
+    vTaskDelete(NULL);
+}
+
+static void weather_fetch_task(void *pvParameters) {
+    const char* city = (const char*)pvParameters;
+    weather_fetch_city(city ? city : "Montreal", weather_ui_update);
+    vTaskDelete(NULL);
+}
+
+static void geo_fetch_task(void *pvParameters) {
+    geo_fetch_info(&geo_info);
+    if (current_screen == SCREEN_GEO){
+        draw_geo();
+    }
+    vTaskDelete(NULL);
+}
+
+static void action_games(void) {nav_push(SCREEN_GAMES); }
+static void action_placeholder(void) { update_screenf("Not implemented"); }
+static void action_open_weather(void) { nav_push(SCREEN_WEATHER); }
+static void action_tnh(void) { nav_push(SCREEN_TNH); }
+static void action_open_settings(void) { nav_push(SCREEN_SETTINGS); }
+static void action_power(void) { nav_push(SCREEN_POWER); }
+static void action_shutdown(void) { 
+    update_screenf("Shutting down...");
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    u8g2_ClearBuffer(&u8g2);
+    u8g2_SendBuffer(&u8g2);
+    u8g2_SetPowerSave(&u8g2, 1); // 1 = Enable power save
+
+    esp_deep_sleep_start();
+}
+static void action_restart(void) {
+    update_screenf("Restarting...");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+}
+static void action_time(void) { 
+    nav_push(SCREEN_TIME); 
+    if (!wifi_is_connected()) { 
+        update_screenf("WiFi required"); 
+        return;
+    } 
+    draw_time();
+}
+static void action_geo(void) { 
+    nav_push(SCREEN_GEO);
+    if (!wifi_is_connected()){
+        update_screenf("Geo: WiFi required");
+        return;
+    }
+
+    if (!geo_info.ok){
+        update_screenf("Loading Geo...");
+        xTaskCreate(geo_fetch_task, "geo_task", 4096, NULL, 5, NULL);
+    } else {
+        draw_geo(); // Already in ram, display immediatly
+    }
+}
+static void action_wifi(void) {
+    nav_push(SCREEN_WIFI);
+    if (!wifi_is_connected()) {
+        update_screenf("WiFi: connecting...");
+        xTaskCreate(wifi_connect_task, "wifi_task", 4096, NULL, 5, NULL);
+    } else {
+        draw_wifi_info();
     }
 }
 
 static void action_weather_mtl(void) {
-    if (wifi_connected) {
-        weather_fetch_city("Montreal", weather_ui_update);
-        set_screen(SCREEN_WEATHER_MTL);
-    } else {
+    nav_push(SCREEN_WEATHER_MTL);
+    if (!wifi_is_connected()) {
         update_screenf("WiFi connection failed");
-    }
+        return;
+    } 
+    
+    update_screenf("Loading weather...");
+    xTaskCreate(weather_fetch_task, "weather_task", 4096, "Montreal", 5, NULL);
 }
 
-static void log_mem_usage(void) {
-    // Heap
-    size_t free_heap = esp_get_free_heap_size();
-    size_t min_free_heap = esp_get_minimum_free_heap_size();
-    size_t free_8bit = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-    size_t min_free_8bit = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
-
-    ESP_LOGI("mem", "heap free=%u min=%u, 8bit free=%u min=%u",
-             (unsigned)free_heap, (unsigned)min_free_heap,
-             (unsigned)free_8bit, (unsigned)min_free_8bit);
-
-    // Stack (current task)
-    UBaseType_t words = uxTaskGetStackHighWaterMark(NULL);
-    ESP_LOGI("mem", "stack high-water: %u bytes", (unsigned)(words * sizeof(StackType_t)));
+static void action_reset_wifi(void){
+    update_screenf("Resetting Wi-Fi...\nRestarting device");
+    wifi_reset_provisioning();
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_restart();
 }
+
+// static void log_mem_usage(void) {
+//     // Heap
+//     size_t free_heap = esp_get_free_heap_size();
+//     size_t min_free_heap = esp_get_minimum_free_heap_size();
+//     size_t free_8bit = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+//     size_t min_free_8bit = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+//
+//     ESP_LOGI("mem", "heap free=%u min=%u, 8bit free=%u min=%u",
+//              (unsigned)free_heap, (unsigned)min_free_heap,
+//              (unsigned)free_8bit, (unsigned)min_free_8bit);
+//
+//     // Stack (current task)
+//     UBaseType_t words = uxTaskGetStackHighWaterMark(NULL);
+//     ESP_LOGI("mem", "stack high-water: %u bytes", (unsigned)(words * sizeof(StackType_t)));
+// }
 
 // Main app
 void app_main(void) {
     i2c_master_init();
     u8g2_init();
     uart_init();
+    nvs_init();
 
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
+    nav_reset(); // Start on main menu
 
-    // ble_init();
-
-    set_screen(SCREEN_MAIN); // Start on main menu
+    wifi_init();
 
     uint8_t* data = (uint8_t*) malloc(BUF_SIZE);
     bool running = true;
@@ -682,13 +698,6 @@ void app_main(void) {
         if (current_screen == SCREEN_TIME) {
             draw_time();
         }
-
-        // if (current_screen == SCREEN_BT) {
-        //     ble_scan_start();
-        //     if (ble_devices_take_dirty()) {
-        //         draw_bt_devices();
-        //     }
-        // }
 
         vTaskDelay(pdMS_TO_TICKS(100));
     }

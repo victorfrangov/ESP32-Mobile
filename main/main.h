@@ -11,9 +11,10 @@
 #include <esp_heap_caps.h>
 #include <unistd.h> // For STDIN_FILENO
 #include <u8g2_esp32_hal.h>
+#include <esp_sleep.h>
+#include <esp_system.h>
 
 #include "wifi.h"
-// #include "ble.h"
 #include "dht20.h"
 #include "weather.h"
 #include "geolocation.h"
@@ -36,6 +37,8 @@
 
 #define STATUS_BAR_H            10
 
+#define MAX_NAV_DEPTH 3
+
 typedef enum {
     SCREEN_MAIN,
     SCREEN_SETTINGS,
@@ -45,7 +48,8 @@ typedef enum {
     SCREEN_TNH,
     SCREEN_WIFI,
     SCREEN_GEO,
-    SCREEN_BT
+    SCREEN_GAMES,
+    SCREEN_POWER
 } Screen;
 
 typedef void (*MenuAction)(void);
@@ -71,6 +75,9 @@ typedef enum {
     KEY_ESC
 } Key;
 
+void nav_push(Screen next);
+void nav_pop(void);
+void nav_reset(void);
 void update_screenf(const char* fmt, ...);
 void update_screenf_font(const uint8_t* font, const char* fmt, ...);
 

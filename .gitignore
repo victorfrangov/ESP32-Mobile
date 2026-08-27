@@ -1,11 +1,12 @@
 # Ignore build output directories
 build/
-/u8g2/
+u8g2/
 *.old
-wifi_config.h
 .cache/
 managed_components/
 main/secrets.h
+*.projbuild
+.agents/
 
 # Ignore object files and binaries
 *.o

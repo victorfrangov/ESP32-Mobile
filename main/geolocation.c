@@ -1,4 +1,5 @@
 #include "geolocation.h"
+#include "esp_crt_bundle.h"
 
 static const char* TAG = "GEO";
 
@@ -6,6 +7,7 @@ static bool geo_fetch_once(const char* url, GeoInfo* out) {
     esp_http_client_config_t cfg = {
         .url = url,
         .timeout_ms = 5000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
@@ -36,16 +38,16 @@ static bool geo_fetch_once(const char* url, GeoInfo* out) {
         return false;
     }
 
-    char buf[256];
+    char buf[512];
     int len = esp_http_client_read(client, buf, sizeof(buf) - 1);
-    buf[len] = '\0';
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
     if (len <= 0) {
-        strlcpy(out->message, "Empty response", sizeof(out->message));
+        strlcpy(out->message, "Empty/error response", sizeof(out->message));
         return false;
     }
+    buf[len] = '\0';
 
     cJSON* root = cJSON_Parse(buf);
     if (!root) {
@@ -83,27 +85,13 @@ static bool geo_fetch_once(const char* url, GeoInfo* out) {
     return out->ok;
 }
 
-bool geo_fetch_info(const char* ip, GeoInfo* out) {
+bool geo_fetch_info(GeoInfo* out) {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
 
     char url[128];
-    if (ip && ip[0]) {
-        snprintf(url, sizeof(url),
-                 "http://ip-api.com/json/%s?fields=status,message,countryCode,region,city,offset",
-                 ip);
-    } else {
-        snprintf(url, sizeof(url),
-                 "http://ip-api.com/json/?fields=status,message,countryCode,region,city,offset");
-    }
+    snprintf(url, sizeof(url),
+            "http://ip-api.com/json/?fields=status,message,countryCode,region,city,offset");
 
-    const int max_retries = 3;
-    for (int i = 0; i < max_retries; ++i) {
-        if (geo_fetch_once(url, out)) return true;
-
-        int backoff_ms = 500 * (i + 1); // 500ms, 1000ms, 1500ms
-        vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-    }
-
-    return false;
+    return geo_fetch_once(url, out);
 }

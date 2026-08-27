@@ -1,130 +1,133 @@
 #include "wifi.h"
+#include "esp_err.h"
+
+#include <wifi_provisioning/manager.h>
+#include <wifi_provisioning/scheme_ble.h>
 
 static uint8_t tries = 0;
-static EventGroupHandle_t wifi_event_group;
-
-static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
-static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
+static EventGroupHandle_t wifi_event_group = NULL;
+static bool s_wifi_inited = false;
+static bool s_wifi_connected = false;
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data){
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START){
-        ESP_LOGI(WIFI_TAG, "Connecting to AP...");
-        esp_wifi_connect();
+        ESP_LOGI(WIFI_TAG, "Wi-Fi STA started");
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED){
+        s_wifi_connected = false;
         if (tries < MAX_FAILURES){
-            ESP_LOGI(WIFI_TAG, "Reconnecting to AP...");
+            ESP_LOGI(WIFI_TAG, "Reconnecting to AP... (try %d/%d)", tries + 1, MAX_FAILURES);
             esp_wifi_connect();
             tries++;
         } else {
-            xEventGroupSetBits(wifi_event_group, WIFI_FAILURE);
+            if (wifi_event_group) {
+                xEventGroupSetBits(wifi_event_group, WIFI_FAILURE);
+            }
         }
     }
 }
 
-//event handler for ip events
 static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data){
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP){
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(WIFI_TAG, "STA IP: " IPSTR, IP2STR(&event->ip_info.ip));
         tries = 0;
-        xEventGroupSetBits(wifi_event_group, WIFI_SUCCESS);
+        s_wifi_connected = true;
+        if (wifi_event_group) {
+            xEventGroupSetBits(wifi_event_group, WIFI_SUCCESS);
+        }
     }
 }
 
-//use ret and esp_loge to gracefeully handle errors, wifi errors are not fatal.
-esp_err_t connect_wifi(void){
-	int status = WIFI_FAILURE;
+bool wifi_is_connected(void) {
+    return s_wifi_connected;
+}
 
-	/** INITIALIZE ALL THE THINGS **/
-	//initialize the esp network interface
-	ESP_ERROR_CHECK(esp_netif_init());
+esp_err_t wifi_init(void) {
+    if (s_wifi_inited) return ESP_OK;
 
-	//initialize default esp event loop
-	ESP_ERROR_CHECK(esp_event_loop_create_default());
+    // 1. Base network & event loop initialization
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
 
-	//create wifi station in the wifi driver
-	esp_netif_create_default_wifi_sta();
-
-	//setup wifi station with the default wifi configuration
-	wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    /** EVENT LOOP **/
-	wifi_event_group = xEventGroupCreate();
-
-    esp_event_handler_instance_t wifi_handler_event_instance;
+    // 2. Register Wi-Fi & IP event handlers
+    wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &wifi_handler_event_instance));
-
-    esp_event_handler_instance_t got_ip_event_instance;
+        ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &ip_event_handler,
-                                                        NULL,
-                                                        &got_ip_event_instance));
+        IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL, NULL));
 
-    /** START THE WIFI DRIVER **/
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASSWORD,
-	     .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-            .pmf_cfg = {
-                .capable = true,
-                .required = false
-            },
-        },
+    // 3. Check Provisioning Manager
+    wifi_prov_mgr_config_t prov_config = {
+        .scheme = wifi_prov_scheme_ble,
+        .scheme_event_handler = WIFI_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM
     };
+    ESP_ERROR_CHECK(wifi_prov_mgr_init(prov_config));
 
-    esp_wifi_set_ps(WIFI_PS_NONE);
+    bool provisioned = false;
+    ESP_ERROR_CHECK(wifi_prov_mgr_is_provisioned(&provisioned));
 
-    // set the wifi controller to be a station
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    if (!provisioned) {
+        ESP_LOGI(WIFI_TAG, "Starting BLE provisioning as PROV_ESP32_MOBILE...");
+        const char *service_name = "PROV_ESP32_MOBILE";
+        wifi_prov_security_t security = WIFI_PROV_SECURITY_0;
+        
+        // Start BLE advertising for provisioning
+        ESP_ERROR_CHECK(wifi_prov_mgr_start_provisioning(security, NULL, service_name, NULL));
 
-    // set the wifi config
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+        // Wait until phone sends credentials and provisioning finishes
+        wifi_prov_mgr_wait();
+        wifi_prov_mgr_deinit();
+    } else {
+        ESP_LOGI(WIFI_TAG, "Already provisioned. Starting Wi-Fi...");
+        wifi_prov_mgr_deinit();
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        ESP_ERROR_CHECK(esp_wifi_start());
+        esp_wifi_connect();
+    }
 
-    // set the bandwidth to HT40
-    ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT40));
+    s_wifi_inited = true;
+    return ESP_OK;
+}
 
-    // start the wifi driver
-    ESP_ERROR_CHECK(esp_wifi_start());
+esp_err_t wifi_reset_provisioning(void){
+    ESP_LOGI(WIFI_TAG, "Erasing saved WI-Fi creds...");
+    wifi_prov_mgr_reset_provisioning();
+    esp_wifi_restore();
+    s_wifi_connected = false;
+    return ESP_OK;
+}
 
-    ESP_LOGI(WIFI_TAG, "STA initialization complete");
 
-    /** NOW WE WAIT **/
+esp_err_t connect_wifi(void) {
+    if (!s_wifi_inited) {
+        esp_err_t err = wifi_init();
+        if (err != ESP_OK) return err;
+    }
+
+    if (wifi_is_connected()) {
+        return WIFI_SUCCESS;
+    }
+
+    tries = 0;
+    xEventGroupClearBits(wifi_event_group, WIFI_SUCCESS | WIFI_FAILURE);
+    ESP_LOGI(WIFI_TAG, "Connecting to AP...");
+    esp_wifi_connect();
+
     EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
             WIFI_SUCCESS | WIFI_FAILURE,
             pdFALSE,
             pdFALSE,
-            portMAX_DELAY);
+            pdMS_TO_TICKS(15000));
 
-    /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
-     * happened. */
     if (bits & WIFI_SUCCESS) {
-        ESP_LOGI(WIFI_TAG, "Connected to ap");
-
-        wifi_ap_record_t ap_info;
-        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
-            ESP_LOGI("WIFI", "RSSI: %d dBm", ap_info.rssi);
-        }
-
-        status = WIFI_SUCCESS;
-    } else if (bits & WIFI_FAILURE) {
-        ESP_LOGI(WIFI_TAG, "Failed to connect to ap");
-        status = WIFI_FAILURE;
+        ESP_LOGI(WIFI_TAG, "Connected to AP");
+        return WIFI_SUCCESS;
     } else {
-        ESP_LOGE(WIFI_TAG, "UNEXPECTED EVENT");
-        status = WIFI_FAILURE;
+        ESP_LOGE(WIFI_TAG, "Failed to connect to AP");
+        return WIFI_FAILURE;
     }
-
-    /* The event will not be processed after unregister */
-    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, got_ip_event_instance));
-    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_handler_event_instance));
-    vEventGroupDelete(wifi_event_group);
-
-    return status;
 }

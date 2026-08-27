@@ -12,4 +12,4 @@ typedef struct {
     bool ok;
 } GeoInfo;
 
-bool geo_fetch_info(const char* ip, GeoInfo* out);
+bool geo_fetch_info(GeoInfo* out);

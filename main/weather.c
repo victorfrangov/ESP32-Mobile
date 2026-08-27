@@ -1,4 +1,5 @@
 #include "weather.h"
+#include "esp_crt_bundle.h"
 
 #define WEATHER_API_KEY API_KEY
 
@@ -12,15 +13,15 @@ esp_err_t weather_fetch_city(const char *city, weather_update_callback_t update_
     if (!city || !update_ui) return ESP_ERR_INVALID_ARG;
 
     char url[256];
-    // TODO: URL-encode `city` if needed.
     snprintf(url, sizeof(url),
-             "http://api.openweathermap.org/data/2.5/weather?q=%s&units=metric&appid=%s",
+             "https://api.openweathermap.org/data/2.5/weather?q=%s&units=metric&appid=%s",
              city, WEATHER_API_KEY);
 
     esp_http_client_config_t config = {
         .url = url,
         .method = HTTP_METHOD_GET,
-        .timeout_ms = 10000
+        .timeout_ms = 10000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -91,7 +92,6 @@ esp_err_t weather_fetch_city(const char *city, weather_update_callback_t update_
             cJSON *w0 = (weather && cJSON_IsArray(weather)) ? cJSON_GetArrayItem(weather, 0) : NULL;
             cJSON *desc = w0 ? cJSON_GetObjectItem(w0, "description") : NULL;
 
-            // assume `desc` is a cJSON* for the "description" field
             const char* desc_str = cJSON_GetStringValue(desc);
             strlcpy(info.desc, desc_str ? desc_str : "", sizeof(info.desc));
             capitalize_first(info.desc);
