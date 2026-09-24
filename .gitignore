@@ -6,7 +6,6 @@ u8g2/
 components/
 managed_components/
 main/secrets.h
-*.projbuild
 .agents/
 
 # Ignore object files and binaries
@@ -36,3 +35,6 @@ __pycache__/
 .idea/
 *.swp
 .DS_Store
+
+# Local build config (holds WiFi credentials and API key). Shared settings live in sdkconfig.defaults
+sdkconfig

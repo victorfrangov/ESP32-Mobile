@@ -1,0 +1,21 @@
+menu "Mobile Device Configuration"
+
+    config WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            SSID for the Wi-Fi network to connect to.
+
+    config WIFI_PASSWORD
+        string "WiFi Password"
+        default ""
+        help
+            Password for the Wi-Fi network.
+
+    config WEATHER_API_KEY
+        string "OpenWeatherMap API Key"
+        default ""
+        help
+            API Key for accessing OpenWeatherMap API services.
+
+endmenu
